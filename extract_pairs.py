@@ -341,7 +341,172 @@ class CWERulePairExtractor:
         print("PIPELINE COMPLETE!")
         print("=" * 60 + "\n")
 
+def generate_cot_prompt(self, cwe_id, pair_data, example_code=None):
+    """
+    Generate a chain-of-thought prompt for a given CWE-rule pair.
+    
+    Args:
+        cwe_id: CWE identifier (e.g., "CWE-79")
+        pair_data: Dictionary containing cwe_info and rules
+        example_code: Optional code snippet to use as example
+    
+    Returns:
+        String containing the formatted CoT prompt
+    """
+    cwe_info = pair_data['cwe_info']
+    rules = pair_data['rules']
+    
+    # Select the highest confidence rule (prefer explicit tags)
+    best_rule = max(rules, key=lambda r: (
+        1.0 if r.get('source') == 'explicit_tag' else r.get('confidence', 0)
+    ))
+    
+    # Build the reasoning chain
+    cwe_name = cwe_info.get('name', 'Unknown Vulnerability')
+    cwe_desc = cwe_info.get('description', '')
+    rule_message = best_rule.get('message', '')
+    
+    # Create structured CoT prompt
+    prompt = f"""Q: Does this code contain a {cwe_name} vulnerability ({cwe_id})?
+
+    A: Let me analyze this step by step:
+
+    Step 1 - Understanding the vulnerability type:
+    {cwe_name} occurs when {self._simplify_description(cwe_desc)}
+
+    Step 2 - Identifying relevant code patterns:
+    I need to look for {self._extract_detection_pattern(rule_message, cwe_name)}
+
+    Step 3 - Analyzing the code:
+    """
+    
+    if example_code:
+        prompt += f"Examining the provided code snippet...\n"
+    else:
+        prompt += f"[Analyze the specific code patterns]\n"
+    
+    prompt += f"""
+    Step 4 - Checking for mitigations:
+    I'll verify if proper security controls are in place.
+
+    Step 5 - Making a determination:
+    Based on the analysis, [state whether vulnerability is present and why].
+
+    The answer is [yes/no]."""
+
+    return prompt
+
+def _simplify_description(self, description):
+    """Simplify CWE description for prompt readability"""
+    # Take first sentence or first 200 chars
+    desc = description.strip()
+    
+    # Get first sentence
+    sentences = desc.split('. ')
+    if sentences:
+        first_sentence = sentences[0]
+        if not first_sentence.endswith('.'):
+            first_sentence += '.'
+        return first_sentence.lower()
+    
+    return desc[:200] + '...' if len(desc) > 200 else desc
+
+def _extract_detection_pattern(self, rule_message, cwe_name):
+    """Extract key detection patterns from rule message"""
+    # Clean up the message
+    message = rule_message.lower()
+    
+    # Common patterns to look for
+    patterns = []
+    
+    if 'injection' in cwe_name.lower() or 'injection' in message:
+        patterns.append("unsanitized input being used in sensitive operations")
+    
+    if 'xss' in message or 'cross-site scripting' in cwe_name.lower():
+        patterns.append("unescaped user input in HTML context")
+    
+    if 'sql' in message:
+        patterns.append("string concatenation in SQL queries without parameterization")
+    
+    if 'command' in message or 'exec' in message:
+        patterns.append("user input passed to system commands")
+    
+    if 'path' in message or 'traversal' in message:
+        patterns.append("user-controlled file paths without validation")
+    
+    if 'crypto' in message or 'hash' in message:
+        patterns.append("weak cryptographic algorithms or improper key management")
+    
+    if patterns:
+        return ', '.join(patterns)
+    
+    # Fallback: use the rule message directly
+    return message[:150]
+
+def generate_cot_examples_for_top_cwes(self, pairs, top_n=10):
+    """Generate CoT prompts for the top N CWEs by rule count"""
+    print("=" * 60)
+    print(f"GENERATING COT PROMPTS FOR TOP {top_n} CWEs")
+    print("=" * 60)
+    
+    # Sort by rule count
+    sorted_cwes = sorted(
+        pairs.items(), 
+        key=lambda x: x[1]['rule_count'], 
+        reverse=True
+    )[:top_n]
+    
+    cot_prompts = {}
+    
+    for cwe_id, pair_data in sorted_cwes:
+        cwe_name = pair_data['cwe_info'].get('name', 'Unknown')
+        print(f"\nGenerating prompt for {cwe_id}: {cwe_name}")
+        
+        prompt = self.generate_cot_prompt(cwe_id, pair_data)
+        cot_prompts[cwe_id] = {
+            'cwe_name': cwe_name,
+            'prompt': prompt,
+            'rule_count': pair_data['rule_count']
+        }
+    
+    return cot_prompts
+
+def save_cot_prompts(self, cot_prompts, output_file="./outputs/cot_prompts.json"):
+    """Save generated CoT prompts to file"""
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(cot_prompts, f, indent=2, ensure_ascii=False)
+    
+    print(f"\nCoT prompts saved to: {output_file}")
+    
+    # Also save as text for easy reading
+    text_file = output_file.replace('.json', '.txt')
+    with open(text_file, 'w', encoding='utf-8') as f:
+        for cwe_id, data in cot_prompts.items():
+            f.write(f"\n{'=' * 60}\n")
+            f.write(f"{cwe_id}: {data['cwe_name']}\n")
+            f.write(f"{'=' * 60}\n\n")
+            f.write(data['prompt'])
+            f.write(f"\n\n")
+    
+    print(f"Text version saved to: {text_file}")
+
 if __name__ == "__main__":
     extractor = CWERulePairExtractor(SEMGREP_DIR, CWE_XML)
+    
+    # Run main pipeline
     pairs = extractor.run_pipeline(nlp_threshold=0.6)
     extractor.save_results(pairs, OUTPUT_FILE)
+    
+    # Generate CoT prompts for top CWEs
+    cot_prompts = extractor.generate_cot_examples_for_top_cwes(pairs, top_n=20)
+    extractor.save_cot_prompts(cot_prompts, "./outputs/cot_prompts.json")
+    
+    # Example: Generate prompt for a specific CWE
+    if "CWE-89" in pairs:
+        print("\n" + "=" * 60)
+        print("EXAMPLE: SQL Injection CoT Prompt")
+        print("=" * 60)
+        sql_injection_prompt = extractor.generate_cot_prompt("CWE-89", pairs["CWE-89"])
+        print(sql_injection_prompt)
