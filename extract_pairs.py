@@ -7,6 +7,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 from pathlib import Path
+import re
 
 # Configuration
 SEMGREP_DIR = "./data/semgrep-rules"
@@ -43,9 +44,9 @@ class CWERulePairExtractor:
                         
                         # Look for CWE in various metadata fields
                         cwe = (metadata.get('cwe') or 
-                               metadata.get('CWE') or
-                               metadata.get('cwe-id') or
-                               metadata.get('cwe_id'))
+                            metadata.get('CWE') or
+                            metadata.get('cwe-id') or
+                            metadata.get('cwe_id'))
                         
                         if cwe:
                             # Handle both single CWE and list of CWEs
@@ -54,10 +55,17 @@ class CWERulePairExtractor:
                             for cwe_id in cwe_list:
                                 # Normalize to "CWE-XXX" format
                                 cwe_str = str(cwe_id)
-                                if not cwe_str.startswith('CWE'):
-                                    cwe_str = f"CWE-{cwe_str}"
                                 
-                                cwe_to_rules[cwe_str].append({
+                                match = re.search(r'CWE-(\d+)', cwe_str, re.IGNORECASE)
+                                if match:
+                                    cwe_normalized = f"CWE-{match.group(1)}"
+                                elif cwe_str.isdigit():
+                                    cwe_normalized = f"CWE-{cwe_str}"
+                                else:
+                                    # Skip if we can't parse it
+                                    continue
+                                
+                                cwe_to_rules[cwe_normalized].append({
                                     'rule_id': rule.get('id', 'unknown'),
                                     'message': rule.get('message', ''),
                                     'severity': rule.get('severity', ''),
